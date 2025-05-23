@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 # Конфигурация
 MAX_URL_LEN = 100
 BATCH_SIZE = 32
-EPOCHS = 50
+EPOCHS = 20
 LEARNING_RATE = 0.01
 DATA_PATH = "urls.csv"
 MODEL_PATH = "phishing_model.npy"
@@ -24,20 +24,22 @@ def sigmoid_derivative(x):
 # Загрузка данных
 def load_data():
     try:
-        # Чтение CSV с явным указанием заголовка и обработкой mixed types
+        # Чтение CSV с явным указанием заголовка
         data = pd.read_csv(DATA_PATH,
                            sep=',',
-                           header=0,  # Используем первую строку как заголовок
-                           names=['url', 'is_phishing'],  # Явные имена столбцов
-                           dtype={'url': str, 'is_phishing': int},  # Явные типы данных
-                           on_bad_lines='warn',  # Пропускать проблемные строки с предупреждением
-                           low_memory=False)
+                           header=0,
+                           names=['url', 'is_phishing'],
+                           dtype={'url': str, 'is_phishing': str},  # Сначала читаем как строку
+                           on_bad_lines='skip')  # Пропускаем проблемные строки
+
+        # Преобразование меток в числовой формат с обработкой ошибок
+        data['is_phishing'] = pd.to_numeric(data['is_phishing'], errors='coerce')
 
         # Удаление строк с пропущенными значениями
         data = data.dropna()
 
-        # Преобразование меток в числовой формат (на случай, если некоторые значения строковые)
-        data['is_phishing'] = pd.to_numeric(data['is_phishing'], errors='coerce').fillna(0).astype(int)
+        # Преобразование в целые числа
+        data['is_phishing'] = data['is_phishing'].astype(int)
 
         # Проверка распределения классов
         class_counts = data['is_phishing'].value_counts()
@@ -47,12 +49,6 @@ def load_data():
 
     except Exception as e:
         print(f"Ошибка загрузки данных: {e}")
-        # Возвращаем тестовые данные, если файл не найден или есть другие ошибки
-        test_urls = ["https://google.com", "http://phishing-site.com",
-                     "https://example.com", "http://steal-info.xyz",
-                     "https://github.com", "http://fake-login-page.com"]
-        test_labels = [0, 1, 0, 1, 0, 1]
-        return test_urls, test_labels
 
 
 # Создание словаря символов
@@ -174,25 +170,11 @@ def train_model():
     np.save(MODEL_PATH, weights)
     print(f"Model saved to {MODEL_PATH}")
 
-    # Графики обучения
-    plt.figure(figsize=(12, 5))
-    plt.subplot(1, 2, 1)
-    plt.plot(losses)
-    plt.title('Training Loss')
-
-    plt.subplot(1, 2, 2)
-    plt.plot(accuracies)
-    plt.title('Validation Accuracy')
-
-    plt.tight_layout()
-    plt.savefig('training_plot.png')
-    plt.close()
 
 
 # Предсказание
 def predict(url):
     try:
-        # Загружаем данные один раз при старте
         if not hasattr(predict, 'char_to_idx'):
             urls, _ = load_data()
             predict.char_to_idx = create_char_mapping(urls)
@@ -202,7 +184,7 @@ def predict(url):
         _, output = forward(np.array([seq]), predict.weights)
         prob = output[0][0]
 
-        return "Фишинг" if prob > 0.5 else "Безопасный", prob
+        return "Фишинг" if prob > 0.1 else "Безопасный", prob
     except Exception as e:
         print(f"Ошибка предсказания: {e}")
         return "Ошибка", 0.0
@@ -212,17 +194,107 @@ if __name__ == "__main__":
     # train_model()
     # print("Модель обучена------------------------")
 
-
     test_urls = [
-        "https://google.com",
-        "http://phishing-site.com",
-        "https://example.com/login",
-        "http://steal-your-data.xyz",
+        # Легитимные
+        "https://www.google.com",
+        "https://www.youtube.com",
+        "https://github.com",
+        "https://www.wikipedia.org",
+        "https://www.amazon.com",
+        "https://www.microsoft.com",
+        "https://www.apple.com",
+        "https://www.linkedin.com",
+        "https://twitter.com",
+        "https://www.instagram.com",
+        "https://www.reddit.com",
+        "https://www.netflix.com",
+        "https://www.spotify.com",
+        "https://www.paypal.com",
+        "https://www.ebay.com",
+        "https://www.dropbox.com",
+        "https://www.twitch.tv",
+        "https://www.aliexpress.com",
+        "https://www.adobe.com",
+        "https://www.cnn.com",
+        "https://www.bbc.com",
+        "https://www.nytimes.com",
         "https://www.speedtest.net/",
+        "https://translate.google.ru",
+        "https://www.ozon.ru",
+
+        # Фишинговые
+        "http://secure-login-facebook.com",
+        "https://g00gle-account.com",
+        "http://amaz0n-payments.com",
+        "https://apple-id-verify.com",
+        "http://microsoft-security-update.com",
+        "https://linkedin-profile-confirm.com",
+        "http://paypal-account-limit.com",
         "https://www.speedtestt.net/",
-        "https://anytask.org/",
-        "https://www.youtube.com/watch?v=7inR7uMd-Ng",
-        "https://www.youtube.com/"
+        "http://steal-your-data.xyz",
+        "http://phishing-site.com",
+        "http://steamcommunity-support.com",
+        "https://twitter-password-reset.com",
+        "http://instagram-login-safe.com",
+        "https://whatsapp-verification-code.com",
+        "http://bankofamerica-securelogin.com",
+        "https://chase-online-banking.com",
+        "http://wellsfargo-account-alert.com",
+        "https://ebay-item-confirmation.com",
+        "http://dropbox-file-share-alert.com",
+        "https://spotify-premium-renew.com",
+        "http://twitch-account-recovery.com",
+        "https://aliexpress-order-confirm.com",
+        "http://adobe-id-verification.com",
+        "https://cnn-breaking-news-alert.com",
+        "http://bbc-account-update.com",
+        "https://nytimes-subscription-renew.com",
+        "http://walmart-order-confirmation.com",
+        "https://target-special-offers.com",
+        "http://bestbuy-electronic-deals.com",
+        "https://stackoverflow-account-help.com",
+        "http://quora-email-verification.com",
+        "https://medium-membership-upgrade.com",
+        "http://tumblr-blog-secure.com",
+        "https://pinterest-pin-alert.com",
+        "http://flickr-photo-update.com",
+        "https://slack-workspace-invite.com",
+        "http://trello-board-security.com",
+        "https://notion-account-recovery.com",
+        "http://zoom-meeting-invite.com",
+        "https://skype-chat-update.com",
+        "http://discord-server-alert.com",
+        "https://telegram-account-verify.com",
+        "http://signal-message-update.com",
+        "https://mozilla-firefox-update.com",
+        "http://duckduckgo-search-alert.com",
+        "https://cloudflare-security-check.com",
+        "http://digitalocean-server-alert.com",
+        "https://nginx-config-update.com",
+        "http://python-package-alert.com",
+        "https://java-install-required.com",
+        "http://nodejs-update-required.com",
+        "https://react-security-alert.com",
+        "http://netflix-renew-subscription.com",
+        "https://facebook-login-secure.ru",
+        "http://youtube-premium-offer.com",
+        "https://github-account-verify.com",
+        "http://wikipedia-donation-scam.com",
+        "https://amazon-payment-confirm.com",
+        "http://microsoft-office-update.com",
+        "https://apple-support-center.com",
+        "http://linkedin-job-offer.com",
+        "https://twitter-account-lock.com",
+        "http://instagram-verify-profile.com",
+        "https://reddit-gold-scam.com",
+        "http://netflix-payment-error.com",
+        "https://spotify-family-scam.com",
+        "http://paypal-limited-account.com",
+        "https://ebay-refund-scam.com",
+        "http://dropbox-hacked-alert.com",
+        "https://twitch-subscriber-scam.com",
+        "http://aliexpress-refund.com",
+        "https://adobe-license-expired.com"
     ]
 
     for url in test_urls:
