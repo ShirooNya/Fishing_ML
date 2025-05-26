@@ -8,69 +8,53 @@ import requests
 from bs4 import BeautifulSoup
 import socket
 from urllib3.exceptions import InsecureRequestWarning
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import Dataset, DataLoader
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
 
 # Отключаем предупреждения
 requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
 
 
-class PhishingDetectorNN:
-    def __init__(self, input_size, hidden_size=10, output_size=1):
-        self.weights1 = np.random.randn(input_size, hidden_size) * np.sqrt(2. / input_size)
-        self.weights2 = np.random.randn(hidden_size, output_size) * np.sqrt(2. / hidden_size)
-        self.bias1 = np.zeros((1, hidden_size))
-        self.bias2 = np.zeros((1, output_size))
+class PhishingDataset(Dataset):
+    def __init__(self, features, labels):
+        self.features = features
+        self.labels = labels
 
-    def relu(self, x):
-        return np.maximum(0, x)
+    def __len__(self):
+        return len(self.features)
 
-    def relu_derivative(self, x):
-        return (x > 0).astype(float)
+    def __getitem__(self, idx):
+        return self.features[idx], self.labels[idx]
 
-    def sigmoid(self, x):
-        return 1 / (1 + np.exp(-x))
 
-    def forward(self, X):
-        self.hidden = self.relu(np.dot(X, self.weights1) + self.bias1)
-        self.output = self.sigmoid(np.dot(self.hidden, self.weights2) + self.bias2)
-        return self.output
+class PhishingMLP(nn.Module):
+    def __init__(self, input_size=16):
+        super(PhishingMLP, self).__init__()
+        self.fc1 = nn.Linear(input_size, 64)  # Первый скрытый слой
+        self.fc2 = nn.Linear(64, 32)          # Второй скрытый слой
+        self.fc3 = nn.Linear(32, 1)           # Выходной слой
+        self.dropout = nn.Dropout(0.4)        # Dropout для регуляризации
 
-    def backward(self, X, y, output, learning_rate):
-        output_error = y - output
-        output_delta = output_error * self.sigmoid(self.output) * (1 - self.sigmoid(self.output))
-
-        hidden_error = output_delta.dot(self.weights2.T)
-        hidden_delta = hidden_error * self.relu_derivative(self.hidden)
-
-        self.weights2 += self.hidden.T.dot(output_delta) * learning_rate
-        self.bias2 += np.sum(output_delta, axis=0, keepdims=True) * learning_rate
-        self.weights1 += X.T.dot(hidden_delta) * learning_rate
-        self.bias1 += np.sum(hidden_delta, axis=0, keepdims=True) * learning_rate
-
-    def train(self, X, y, epochs=3000, learning_rate=0.01, batch_size=32):
-        for epoch in range(epochs):
-            for i in range(0, X.shape[0], batch_size):
-                X_batch = X[i:i + batch_size]
-                y_batch = y[i:i + batch_size]
-
-                output = self.forward(X_batch)
-                self.backward(X_batch, y_batch, output, learning_rate)
-
-            if epoch % 500 == 0:
-                output = self.forward(X)
-                loss = np.mean(np.square(y - output))
-                accuracy = np.mean((output > 0.5) == y)
-                print(f"Epoch {epoch}, Loss: {loss:.4f}, Accuracy: {accuracy:.4f}")
-
-    def predict(self, X, threshold=0.5):
-        output = self.forward(X)
-        return (output > threshold).astype(int), output
+    def forward(self, x):
+        x = nn.functional.relu(self.fc1(x))
+        x = self.dropout(x)
+        x = nn.functional.relu(self.fc2(x))
+        x = self.dropout(x)
+        x = torch.sigmoid(self.fc3(x))
+        return x
 
 
 class PhishingDetector:
     def __init__(self):
         self.model = None
+        self.scaler = StandardScaler()
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    def train_model(self, csv_path):
+    def train_model(self, csv_path, epochs=50, batch_size=32, learning_rate=0.001):
         """Обучение модели на данных из CSV"""
         # 1. Загрузка данных
         df = pd.read_csv(csv_path)
@@ -81,15 +65,79 @@ class PhishingDetector:
         for _, row in df.iterrows():
             features = self.extract_features(row)
             X.append(features[:16])  # Берем первые 16 признаков
-            y.append(features[16])  # 17-й элемент - метка
+            y.append(features[16])   # 17-й элемент - метка
 
-        X = np.array(X)
-        y = np.array(y).reshape(-1, 1)
+        X = np.array(X, dtype=np.float32)
+        y = np.array(y, dtype=np.float32).reshape(-1, 1)
 
-        # 4. Создание и обучение модели
-        input_size = X.shape[1]
-        self.model = PhishingDetectorNN(input_size=16)  # 16 входных признаков
-        self.model.train(X, y)
+        # 3. Нормализация данных
+        X = self.scaler.fit_transform(X)
+
+        # 4. Разделение на train/val
+        X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2, random_state=42)
+
+        # 5. Создание DataLoader
+        train_dataset = PhishingDataset(torch.from_numpy(X_train), torch.from_numpy(y_train))
+        val_dataset = PhishingDataset(torch.from_numpy(X_val), torch.from_numpy(y_val))
+
+        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+        val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+
+        # 6. Инициализация модели
+        self.model = PhishingMLP(input_size=16).to(self.device)
+        criterion = nn.BCELoss()
+        optimizer = optim.Adam(self.model.parameters(), lr=learning_rate)
+
+        # 7. Обучение модели
+        best_val_loss = float('inf')
+        for epoch in range(epochs):
+            self.model.train()
+            train_loss = 0.0
+
+            for inputs, labels in train_loader:
+                inputs, labels = inputs.to(self.device), labels.to(self.device)
+
+                optimizer.zero_grad()
+                outputs = self.model(inputs)
+                loss = criterion(outputs, labels)
+                loss.backward()
+                optimizer.step()
+
+                train_loss += loss.item() * inputs.size(0)
+
+            # Валидация
+            self.model.eval()
+            val_loss = 0.0
+            correct = 0
+            total = 0
+
+            with torch.no_grad():
+                for inputs, labels in val_loader:
+                    inputs, labels = inputs.to(self.device), labels.to(self.device)
+                    outputs = self.model(inputs)
+                    loss = criterion(outputs, labels)
+
+                    val_loss += loss.item() * inputs.size(0)
+                    predicted = (outputs > 0.5).float()
+                    total += labels.size(0)
+                    correct += (predicted == labels).sum().item()
+
+            # Вывод статистики
+            train_loss = train_loss / len(train_loader.dataset)
+            val_loss = val_loss / len(val_loader.dataset)
+            val_acc = correct / total
+
+            print(
+                f'Epoch {epoch + 1}/{epochs} - Train Loss: {train_loss:.4f} - Val Loss: {val_loss:.4f} - Val Acc: {val_acc:.4f}')
+
+            # Сохранение лучшей модели
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                torch.save(self.model.state_dict(), 'best_model.pth')
+
+        # Загрузка лучшей модели
+        self.model.load_state_dict(torch.load('best_model.pth'))
+        self.model.eval()
 
     def predict(self, url):
         """Предсказание для нового URL"""
@@ -97,8 +145,15 @@ class PhishingDetector:
             raise Exception("Модель не обучена!")
 
         features = self.extract_live_features(url)
-        prediction, confidence = self.model.predict(features.reshape(1, -1))
-        return "ФИШИНГ" if prediction[0][0] > 0.5 else "БЕЗОПАСНЫЙ", confidence[0][0]
+        features = self.scaler.transform(features.reshape(1, -1))
+        features_tensor = torch.from_numpy(features).float().to(self.device)
+
+        with torch.no_grad():
+            output = self.model(features_tensor)
+            confidence = output.item()
+            prediction = "ФИШИНГ" if confidence > 0.5 else "БЕЗОПАСНЫЙ"
+
+        return prediction, confidence
 
     def safe_float(self, value, default=0.0):
         """Безопасное преобразование в float с обработкой пустых строк"""
@@ -151,8 +206,8 @@ class PhishingDetector:
                 self._has_external_favicon(page_data),  # external_favicon
                 self._has_submit_email(page_data),  # submit_email
                 self._has_iframe(page_data),  # iframe
-                0.0,  # popup_window (нужен JS)
-                0.0,  # onmouseover (нужен JS)
+                self._has_popup_window(page_data),
+                self._has_onmouseover(page_data),
                 self._has_empty_title(page_data),  # empty_title
                 self._domain_in_title(page_data, ext),  # domain_in_title
                 self._get_registration_length(domain_info),  # domain_registration_length
@@ -211,6 +266,25 @@ class PhishingDetector:
     def _has_iframe(self, soup):
         """Проверка iframe"""
         return 1.0 if soup.find('iframe') else 0.0
+
+    def _has_popup_window(self, soup):
+        """Проверяет HTML на JS-код, создающий popup"""
+        if not soup:
+            return 1.0  # Если страница не загрузилась — считаем подозрительным
+
+        scripts = soup.find_all("script")
+        for script in scripts:
+            if script.string and ("window.open" in script.string or "alert(" in script.string):
+                return 1.0  # Нашли подозрительный JS
+        return 0.
+
+    def _has_onmouseover(self, soup):
+        """Проверяет, использует ли страница onmouseover-события"""
+        if not soup:
+            return 1.0  # Страница не загрузилась — риск ↑
+
+        # Ищем любые элементы с onmouseover
+        return 1.0 if soup.find(attrs={"onmouseover": True}) else 0.0
 
     def _has_empty_title(self, soup):
         """Проверка пустого заголовка"""
