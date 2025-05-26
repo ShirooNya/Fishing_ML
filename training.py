@@ -1,302 +1,289 @@
-import pandas as pd
 import numpy as np
-from sklearn.model_selection import train_test_split
-import matplotlib.pyplot as plt
+import pandas as pd
+import whois
+import urllib.parse
+from datetime import datetime
+import tldextract
+import requests
+from bs4 import BeautifulSoup
+import socket
+from urllib3.exceptions import InsecureRequestWarning
 
-# Конфигурация
-MAX_URL_LEN = 100
-BATCH_SIZE = 32
-EPOCHS = 20
-LEARNING_RATE = 0.01
-DATA_PATH = "urls.csv"
-MODEL_PATH = "phishing_model.npy"
-
-
-# Активационные функции
-def sigmoid(x):
-    return 1 / (1 + np.exp(-x))
+# Отключаем предупреждения
+requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
 
 
-def sigmoid_derivative(x):
-    return x * (1 - x)
+class PhishingDetectorNN:
+    def __init__(self, input_size, hidden_size=10, output_size=1):
+        self.weights1 = np.random.randn(input_size, hidden_size) * np.sqrt(2. / input_size)
+        self.weights2 = np.random.randn(hidden_size, output_size) * np.sqrt(2. / hidden_size)
+        self.bias1 = np.zeros((1, hidden_size))
+        self.bias2 = np.zeros((1, output_size))
+
+    def relu(self, x):
+        return np.maximum(0, x)
+
+    def relu_derivative(self, x):
+        return (x > 0).astype(float)
+
+    def sigmoid(self, x):
+        return 1 / (1 + np.exp(-x))
+
+    def forward(self, X):
+        self.hidden = self.relu(np.dot(X, self.weights1) + self.bias1)
+        self.output = self.sigmoid(np.dot(self.hidden, self.weights2) + self.bias2)
+        return self.output
+
+    def backward(self, X, y, output, learning_rate):
+        output_error = y - output
+        output_delta = output_error * self.sigmoid(self.output) * (1 - self.sigmoid(self.output))
+
+        hidden_error = output_delta.dot(self.weights2.T)
+        hidden_delta = hidden_error * self.relu_derivative(self.hidden)
+
+        self.weights2 += self.hidden.T.dot(output_delta) * learning_rate
+        self.bias2 += np.sum(output_delta, axis=0, keepdims=True) * learning_rate
+        self.weights1 += X.T.dot(hidden_delta) * learning_rate
+        self.bias1 += np.sum(hidden_delta, axis=0, keepdims=True) * learning_rate
+
+    def train(self, X, y, epochs=3000, learning_rate=0.01, batch_size=32):
+        for epoch in range(epochs):
+            for i in range(0, X.shape[0], batch_size):
+                X_batch = X[i:i + batch_size]
+                y_batch = y[i:i + batch_size]
+
+                output = self.forward(X_batch)
+                self.backward(X_batch, y_batch, output, learning_rate)
+
+            if epoch % 500 == 0:
+                output = self.forward(X)
+                loss = np.mean(np.square(y - output))
+                accuracy = np.mean((output > 0.5) == y)
+                print(f"Epoch {epoch}, Loss: {loss:.4f}, Accuracy: {accuracy:.4f}")
+
+    def predict(self, X, threshold=0.5):
+        output = self.forward(X)
+        return (output > threshold).astype(int), output
 
 
-# Загрузка данных
-def load_data():
-    try:
-        # Чтение CSV с явным указанием заголовка
-        data = pd.read_csv(DATA_PATH,
-                           sep=',',
-                           header=0,
-                           names=['url', 'is_phishing'],
-                           dtype={'url': str, 'is_phishing': str},  # Сначала читаем как строку
-                           on_bad_lines='skip')  # Пропускаем проблемные строки
+class PhishingDetector:
+    def __init__(self):
+        self.model = None
 
-        # Преобразование меток в числовой формат с обработкой ошибок
-        data['is_phishing'] = pd.to_numeric(data['is_phishing'], errors='coerce')
+    def train_model(self, csv_path):
+        """Обучение модели на данных из CSV"""
+        # 1. Загрузка данных
+        df = pd.read_csv(csv_path)
+        X = []
+        y = []
 
-        # Удаление строк с пропущенными значениями
-        data = data.dropna()
+        # 2. Извлечение признаков
+        for _, row in df.iterrows():
+            features = self.extract_features(row)
+            X.append(features[:16])  # Берем первые 16 признаков
+            y.append(features[16])  # 17-й элемент - метка
 
-        # Преобразование в целые числа
-        data['is_phishing'] = data['is_phishing'].astype(int)
+        X = np.array(X)
+        y = np.array(y).reshape(-1, 1)
 
-        # Проверка распределения классов
-        class_counts = data['is_phishing'].value_counts()
-        print(f"Распределение классов:\n{class_counts}")
+        # 4. Создание и обучение модели
+        input_size = X.shape[1]
+        self.model = PhishingDetectorNN(input_size=16)  # 16 входных признаков
+        self.model.train(X, y)
 
-        return data["url"].values, data["is_phishing"].values
+    def predict(self, url):
+        """Предсказание для нового URL"""
+        if self.model is None:
+            raise Exception("Модель не обучена!")
 
-    except Exception as e:
-        print(f"Ошибка загрузки данных: {e}")
+        features = self.extract_live_features(url)
+        prediction, confidence = self.model.predict(features.reshape(1, -1))
+        return "ФИШИНГ" if prediction[0][0] > 0.5 else "БЕЗОПАСНЫЙ", confidence[0][0]
+
+    def safe_float(self, value, default=0.0):
+        """Безопасное преобразование в float с обработкой пустых строк"""
+        try:
+            if pd.isna(value) or str(value).strip() == '':
+                return default
+            return float(value)
+        except (ValueError, TypeError):
+            return default
+
+    def extract_features(self, row):
+        """Извлечение признаков из строки CSV с защитой от пустых значений"""
+        features = [
+            self.safe_float(row.get('nb_hyperlinks', 0)),
+            self.safe_float(row.get('nb_extCSS', 0)),
+            self.safe_float(row.get('login_form', 0)),
+            self.safe_float(row.get('external_favicon', 0)),
+            self.safe_float(row.get('submit_email', 0)),
+            self.safe_float(row.get('iframe', 0)),
+            self.safe_float(row.get('popup_window', 0)),
+            self.safe_float(row.get('onmouseover', 0)),
+            self.safe_float(row.get('empty_title', 0)),
+            self.safe_float(row.get('domain_in_title', 0)),
+            self.safe_float(row.get('domain_registration_length', 0)),
+            self.safe_float(row.get('domain_age', 0)),
+            self.safe_float(row.get('web_traffic', 0)),
+            self.safe_float(row.get('dns_record', 0)),
+            self.safe_float(row.get('google_index', 0)),
+            self.safe_float(row.get('page_rank', 0)),
+            self.safe_float(row.get('status', 0))
+        ]
+        return np.array(features)
+
+    def extract_live_features(self, url):
+        """Извлечение признаков в реальном времени"""
+        try:
+            # 1. Базовые признаки URL
+            ext = tldextract.extract(url)
+            parsed_url = urllib.parse.urlparse(url)
+
+            # 2. Получаем данные в реальном времени
+            page_data = self._get_page_content(url)
+            domain_info = self._get_domain_info(url)
+
+            # 3. Формируем признаки
+            features = [
+                self._count_hyperlinks(page_data),  # nb_hyperlinks
+                self._count_external_css(page_data),  # nb_extCSS
+                self._has_login_form(page_data),  # login_form
+                self._has_external_favicon(page_data),  # external_favicon
+                self._has_submit_email(page_data),  # submit_email
+                self._has_iframe(page_data),  # iframe
+                0.0,  # popup_window (нужен JS)
+                0.0,  # onmouseover (нужен JS)
+                self._has_empty_title(page_data),  # empty_title
+                self._domain_in_title(page_data, ext),  # domain_in_title
+                self._get_registration_length(domain_info),  # domain_registration_length
+                self._get_domain_age(domain_info),  # domain_age
+                0.0,  # web_traffic (нужен API)
+                float(self._check_dns(ext)),  # dns_record
+                float(self._check_google_index(url)),  # google_index
+                self._get_page_rank(url),  # page_rank
+            ]
+
+            return np.array(features)
+        except Exception as e:
+            print(f"Ошибка анализа URL: {str(e)}")
+            return np.zeros(16)  # Возвращаем нули при ошибке
+
+    def _get_page_content(self, url):
+        """Получение содержимого страницы"""
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        try:
+            response = requests.get(url, headers=headers, timeout=10, verify=False)
+            return BeautifulSoup(response.text, 'html.parser')
+        except:
+            return BeautifulSoup("", 'html.parser')
+
+    def _get_domain_info(self, url):
+        """Получение WHOIS информации"""
+        ext = tldextract.extract(url)
+        try:
+            return whois.whois(f"{ext.domain}.{ext.suffix}")
+        except:
+            return None
+
+    def _count_hyperlinks(self, soup):
+        """Подсчет гиперссылок на странице"""
+        return len(soup.find_all('a', href=True))
+
+    def _count_external_css(self, soup):
+        """Подсчет внешних CSS"""
+        return len([link for link in soup.find_all('link')
+                    if 'stylesheet' in link.get('rel', [])
+                    and 'http' in link.get('href', '')])
+
+    def _has_login_form(self, soup):
+        """Проверка наличия формы логина"""
+        return 1.0 if soup.find('input', {'type': 'password'}) else 0.0
+
+    def _has_external_favicon(self, soup):
+        """Проверка внешнего фавикона"""
+        favicon = soup.find('link', rel='icon')
+        return 1.0 if favicon and 'http' in favicon.get('href', '') else 0.0
+
+    def _has_submit_email(self, soup):
+        """Проверка поля для email"""
+        return 1.0 if soup.find('input', {'type': 'email'}) else 0.0
+
+    def _has_iframe(self, soup):
+        """Проверка iframe"""
+        return 1.0 if soup.find('iframe') else 0.0
+
+    def _has_empty_title(self, soup):
+        """Проверка пустого заголовка"""
+        title = soup.title.string if soup.title else ''
+        return 1.0 if not title.strip() else 0.0
+
+    def _domain_in_title(self, soup, ext):
+        """Проверка домена в заголовке"""
+        if not soup.title:
+            return 0.0
+        title = soup.title.string.lower()
+        return 1.0 if ext.domain.lower() in title else 0.0
+
+    def _get_registration_length(self, domain_info):
+        """Срок регистрации домена в днях"""
+        if not domain_info or not domain_info.expiration_date:
+            return 0.0
+
+        if isinstance(domain_info.expiration_date, list):
+            exp_date = domain_info.expiration_date[0]
+        else:
+            exp_date = domain_info.expiration_date
+
+        return (exp_date - datetime.now()).days
+
+    def _get_domain_age(self, domain_info):
+        """Возраст домена в днях"""
+        if not domain_info or not domain_info.creation_date:
+            return 0.0
+
+        if isinstance(domain_info.creation_date, list):
+            creation_date = domain_info.creation_date[0]
+        else:
+            creation_date = domain_info.creation_date
+
+        return (datetime.now() - creation_date).days
+
+    def _check_dns(self, ext):
+        """Проверка DNS записи"""
+        try:
+            socket.gethostbyname(f"{ext.domain}.{ext.suffix}")
+            return 1
+        except:
+            return 0
+
+    def _check_google_index(self, url):
+        """Проверка индексации в Google (заглушка)"""
+        return 0
+
+    def _get_page_rank(self, url):
+        """PageRank (заглушка)"""
+        return 0.0
 
 
-# Создание словаря символов
-def create_char_mapping(urls):
-    chars = set("".join(urls))
-    return {char: i + 1 for i, char in enumerate(chars)}
-
-
-# Преобразование URL в последовательность
-def url_to_seq(url, char_to_idx, max_len=MAX_URL_LEN):
-    url = url.lower().strip()
-    if not url.startswith(('http://', 'https://')):
-        url = 'http://' + url
-    domain = url.split('//')[-1].split('/')[0]
-    seq = [char_to_idx.get(c, 0) for c in domain[:max_len]]
-    seq += [0] * (max_len - len(seq))
-    return seq
-
-
-# Инициализация весов
-def init_weights(input_size, hidden_size, output_size):
-    np.random.seed(1)
-    return {
-        'w1': np.random.randn(input_size, hidden_size) * 0.01,
-        'b1': np.zeros((1, hidden_size)),
-        'w2': np.random.randn(hidden_size, output_size) * 0.01,
-        'b2': np.zeros((1, output_size))
-    }
-
-
-# Прямое распространение
-def forward(X, weights):
-    z1 = np.dot(X, weights['w1']) + weights['b1']
-    a1 = sigmoid(z1)
-    z2 = np.dot(a1, weights['w2']) + weights['b2']
-    a2 = sigmoid(z2)
-    return a1, a2
-
-
-# Обратное распространение
-def backward(X, y, a1, a2, weights):
-    m = X.shape[0]
-
-    # Ошибка на выходном слое
-    dz2 = a2 - y
-    dw2 = np.dot(a1.T, dz2) / m
-    db2 = np.sum(dz2, axis=0, keepdims=True) / m
-
-    # Ошибка на скрытом слое
-    dz1 = np.dot(dz2, weights['w2'].T) * sigmoid_derivative(a1)
-    dw1 = np.dot(X.T, dz1) / m
-    db1 = np.sum(dz1, axis=0, keepdims=True) / m
-
-    return {'dw1': dw1, 'db1': db1, 'dw2': dw2, 'db2': db2}
-
-
-# Обновление весов
-def update_weights(weights, grads, lr):
-    weights['w1'] -= lr * grads['dw1']
-    weights['b1'] -= lr * grads['db1']
-    weights['w2'] -= lr * grads['dw2']
-    weights['b2'] -= lr * grads['db2']
-    return weights
-
-
-# Обучение модели
-def train_model():
-    urls, labels = load_data()
-    char_to_idx = create_char_mapping(urls)
-    vocab_size = len(char_to_idx)
-
-    # Подготовка данных
-    X = np.array([url_to_seq(url, char_to_idx) for url in urls])
-    y = np.array(labels).reshape(-1, 1)
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-
-    # Инициализация модели
-    input_size = MAX_URL_LEN
-    hidden_size = 64
-    output_size = 1
-    weights = init_weights(input_size, hidden_size, output_size)
-
-    # Обучение
-    losses = []
-    accuracies = []
-
-    for epoch in range(EPOCHS):
-        epoch_loss = 0
-        correct = 0
-
-        for i in range(0, len(X_train), BATCH_SIZE):
-            batch_X = X_train[i:i + BATCH_SIZE]
-            batch_y = y_train[i:i + BATCH_SIZE]
-
-            # Прямое распространение
-            a1, a2 = forward(batch_X, weights)
-
-            # Обратное распространение
-            grads = backward(batch_X, batch_y, a1, a2, weights)
-
-            # Обновление весов
-            weights = update_weights(weights, grads, LEARNING_RATE)
-
-            # Расчет потерь и точности
-            loss = np.mean((a2 - batch_y) ** 2)
-            epoch_loss += loss
-            correct += np.sum((a2 > 0.5) == batch_y)
-
-        # Валидация
-        _, val_output = forward(X_test, weights)
-        val_acc = np.mean((val_output > 0.5) == y_test)
-
-        losses.append(epoch_loss / len(X_train))
-        accuracies.append(val_acc)
-
-        print(f"Epoch {epoch + 1}, Loss: {losses[-1]:.4f}, Accuracy: {val_acc:.4f}")
-
-    # Сохранение модели
-    np.save(MODEL_PATH, weights)
-    print(f"Model saved to {MODEL_PATH}")
-
-
-
-# Предсказание
-def predict(url):
-    try:
-        if not hasattr(predict, 'char_to_idx'):
-            urls, _ = load_data()
-            predict.char_to_idx = create_char_mapping(urls)
-            predict.weights = np.load(MODEL_PATH, allow_pickle=True).item()
-
-        seq = url_to_seq(url, predict.char_to_idx)
-        _, output = forward(np.array([seq]), predict.weights)
-        prob = output[0][0]
-
-        return "Фишинг" if prob > 0.1 else "Безопасный", prob
-    except Exception as e:
-        print(f"Ошибка предсказания: {e}")
-        return "Ошибка", 0.0
-
-
+# Пример использования
 if __name__ == "__main__":
-    # train_model()
-    # print("Модель обучена------------------------")
+    detector = PhishingDetector()
 
-    test_urls = [
-        # Легитимные
-        "https://www.google.com",
-        "https://www.youtube.com",
-        "https://github.com",
-        "https://www.wikipedia.org",
-        "https://www.amazon.com",
-        "https://www.microsoft.com",
-        "https://www.apple.com",
-        "https://www.linkedin.com",
-        "https://twitter.com",
-        "https://www.instagram.com",
-        "https://www.reddit.com",
-        "https://www.netflix.com",
-        "https://www.spotify.com",
-        "https://www.paypal.com",
-        "https://www.ebay.com",
-        "https://www.dropbox.com",
-        "https://www.twitch.tv",
-        "https://www.aliexpress.com",
-        "https://www.adobe.com",
-        "https://www.cnn.com",
-        "https://www.bbc.com",
-        "https://www.nytimes.com",
-        "https://www.speedtest.net/",
-        "https://translate.google.ru",
-        "https://www.ozon.ru",
+    # 1. Обучение модели
+    print("Обучение модели...")
+    detector.train_model("urls.csv")
 
-        # Фишинговые
-        "http://secure-login-facebook.com",
-        "https://g00gle-account.com",
-        "http://amaz0n-payments.com",
-        "https://apple-id-verify.com",
-        "http://microsoft-security-update.com",
-        "https://linkedin-profile-confirm.com",
-        "http://paypal-account-limit.com",
-        "https://www.speedtestt.net/",
-        "http://steal-your-data.xyz",
-        "http://phishing-site.com",
-        "http://steamcommunity-support.com",
-        "https://twitter-password-reset.com",
-        "http://instagram-login-safe.com",
-        "https://whatsapp-verification-code.com",
-        "http://bankofamerica-securelogin.com",
-        "https://chase-online-banking.com",
-        "http://wellsfargo-account-alert.com",
-        "https://ebay-item-confirmation.com",
-        "http://dropbox-file-share-alert.com",
-        "https://spotify-premium-renew.com",
-        "http://twitch-account-recovery.com",
-        "https://aliexpress-order-confirm.com",
-        "http://adobe-id-verification.com",
-        "https://cnn-breaking-news-alert.com",
-        "http://bbc-account-update.com",
-        "https://nytimes-subscription-renew.com",
-        "http://walmart-order-confirmation.com",
-        "https://target-special-offers.com",
-        "http://bestbuy-electronic-deals.com",
-        "https://stackoverflow-account-help.com",
-        "http://quora-email-verification.com",
-        "https://medium-membership-upgrade.com",
-        "http://tumblr-blog-secure.com",
-        "https://pinterest-pin-alert.com",
-        "http://flickr-photo-update.com",
-        "https://slack-workspace-invite.com",
-        "http://trello-board-security.com",
-        "https://notion-account-recovery.com",
-        "http://zoom-meeting-invite.com",
-        "https://skype-chat-update.com",
-        "http://discord-server-alert.com",
-        "https://telegram-account-verify.com",
-        "http://signal-message-update.com",
-        "https://mozilla-firefox-update.com",
-        "http://duckduckgo-search-alert.com",
-        "https://cloudflare-security-check.com",
-        "http://digitalocean-server-alert.com",
-        "https://nginx-config-update.com",
-        "http://python-package-alert.com",
-        "https://java-install-required.com",
-        "http://nodejs-update-required.com",
-        "https://react-security-alert.com",
-        "http://netflix-renew-subscription.com",
-        "https://facebook-login-secure.ru",
-        "http://youtube-premium-offer.com",
-        "https://github-account-verify.com",
-        "http://wikipedia-donation-scam.com",
-        "https://amazon-payment-confirm.com",
-        "http://microsoft-office-update.com",
-        "https://apple-support-center.com",
-        "http://linkedin-job-offer.com",
-        "https://twitter-account-lock.com",
-        "http://instagram-verify-profile.com",
-        "https://reddit-gold-scam.com",
-        "http://netflix-payment-error.com",
-        "https://spotify-family-scam.com",
-        "http://paypal-limited-account.com",
-        "https://ebay-refund-scam.com",
-        "http://dropbox-hacked-alert.com",
-        "https://twitch-subscriber-scam.com",
-        "http://aliexpress-refund.com",
-        "https://adobe-license-expired.com"
-    ]
+    # 2. Проверка URL
+    while True:
+        print("\n" + "=" * 50)
+        url = input("Введите URL для проверки (или 'exit'): ").strip()
+        if url.lower() == 'exit':
+            break
 
-    for url in test_urls:
-        result, prob = predict(url)
-        print(f"{url}: {result} (вероятность: {prob:.4f})")
+        if not url.startswith(('http://', 'https://')):
+            url = 'http://' + url
+
+        result, confidence = detector.predict(url)
+        print(f"\nРезультат для {url}:")
+        print(f"Вероятность фишинга: {confidence * 100:.2f}%")
+        print(f"Заключение: {result}")
