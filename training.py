@@ -36,12 +36,12 @@ class PhishingDataset(Dataset):
 
 
 class PhishingMLP(nn.Module):
-    def __init__(self, input_size=83):
+    def __init__(self, input_size=83):  # 83 входных признака
         super(PhishingMLP, self).__init__()
-        self.fc1 = nn.Linear(input_size, 64)
-        self.fc2 = nn.Linear(64, 32)
-        self.fc3 = nn.Linear(32, 1)
-        self.dropout = nn.Dropout(0.4)
+        self.fc1 = nn.Linear(input_size, 64)   # Первый скрытый слой
+        self.fc2 = nn.Linear(64, 32)    # Второй скрытый слой
+        self.fc3 = nn.Linear(32, 1)     # Выходной слой
+        self.dropout = nn.Dropout(0.4)   # Регуляризация
 
     def forward(self, x):
         x = nn.functional.relu(self.fc1(x))
@@ -63,7 +63,7 @@ class PhishingDetector:
     def load_scaler(self, path='scaler.save'):
         self.scaler = joblib.load(path)
 
-    def train_model(self, csv_path, epochs=5, batch_size=32, learning_rate=0.001):
+    def train_model(self, csv_path, epochs=10, batch_size=32, learning_rate=0.001):
         """Обучение модели на данных из CSV"""
         try:
             # Загрузка данных
@@ -75,10 +75,8 @@ class PhishingDetector:
             # Преобразование status в целые числа (на случай, если они записаны как float)
             df['status'] = df['status'].astype(int)
 
-            # Проверка меток
-            print("Уникальные значения status:", df['status'].unique())
             if not set(df['status'].unique()).issubset({0, 1}):
-                raise ValueError("Метки должны быть 0 или 1 после очистки")
+                raise ValueError("Метки должны быть 0 или 1")
 
             X = df.iloc[:, 1:-1].values.astype(np.float32)
             y = df.iloc[:, -1].values.astype(np.float32).reshape(-1, 1)
@@ -284,6 +282,7 @@ class PhishingDetector:
                 float(self._check_google_index(url)),  # google_index
                 self._get_page_rank(url),  # page_rank
             ]
+            print(features)
 
             return np.array(features)
         except Exception as e:
@@ -322,6 +321,9 @@ class PhishingDetector:
             return None
 
     def _is_ip_address(self, hostname):
+        """
+        Проверяет, является ли переданный хост IP-адресом
+        """
         try:
             socket.inet_aton(hostname)
             return True
@@ -329,17 +331,30 @@ class PhishingDetector:
             return False
 
     def _ratio_digits(self, text):
+        """
+        Вычисляет отношение цифр к общему количеству символов в тексте
+        """
         if not text:
             return 0.0
         return sum(c.isdigit() for c in text) / len(text)
 
     def _is_abnormal_subdomain(self, subdomain):
+        """
+        Определяет аномальную длину поддомена
+        """
         return 1.0 if len(subdomain) > 8 else 0.0
 
     def _has_prefix_suffix(self, domain):
+        """
+        Проверяет наличие дефиса в доменном имени
+        """
         return 1.0 if '-' in domain else 0.0
 
     def _is_random_domain(self, domain):
+        """
+        Анализирует домен на "случайность" по соотношению гласных букв.
+        Возвращает 1.0 если гласных меньше 30%, иначе 0.0.
+        """
         if not domain:  # Проверка на пустую строку
             return 0.0
 
@@ -348,14 +363,25 @@ class PhishingDetector:
         return 1.0 if ratio < 0.3 else 0.0
 
     def _is_shortening_service(self, url):
+        """
+        Проверяет, является ли URL сервисом сокращения ссылок
+        Сравнивает с известными сервисами (bit.ly, goo.gl и др.)
+        """
         services = ['bit.ly', 'goo.gl', 'tinyurl.com', 'ow.ly']
         return 1.0 if any(s in url for s in services) else 0.0
 
     def _has_path_extension(self, path):
+        """
+        Проверяет наличие подозрительных расширений файлов в пути URL
+        Ищет .exe, .js, .zip, .rar в конце пути
+        """
         extensions = ['.exe', '.js', '.zip', '.rar']
         return 1.0 if any(path.endswith(ext) for ext in extensions) else 0.0
 
     def _count_redirections(self, url):
+        """
+        Подсчитывает общее количество редиректов при запросе URL
+        """
         try:
             response = requests.get(url, allow_redirects=True, timeout=5, verify=False)
             return len(response.history)
@@ -363,6 +389,9 @@ class PhishingDetector:
             return 0.0
 
     def _count_external_redirections(self, url):
+        """
+        Считает количество внешних редиректов (на другие домены)
+        """
         try:
             response = requests.get(url, allow_redirects=True, timeout=5, verify=False)
             domain = urllib.parse.urlparse(url).netloc
@@ -371,6 +400,10 @@ class PhishingDetector:
             return 0.0
 
     def _char_repeat_score(self, text):
+        """
+        Вычисляет показатель повторяемости символов в тексте.
+        Возвращает отношение максимального числа повторений символа к длине текста.
+        """
         if not text:
             return 0.0
         counts = {}
@@ -379,38 +412,71 @@ class PhishingDetector:
         return max(counts.values()) / len(text)
 
     def _shortest_word(self, text):
+        """
+        Находит длину самого короткого слова в тексте
+        """
         words = text.split()
         return min(len(word) for word in words) if words else 0.0
 
     def _longest_word(self, text):
+        """
+        Находит длину самого длинного слова в тексте
+        """
         words = text.split()
         return max(len(word) for word in words) if words else 0.0
 
     def _avg_word_length(self, text):
+        """
+        Вычисляет среднюю длину слов в тексте
+        """
         words = text.split()
         return sum(len(word) for word in words) / len(words) if words else 0.0
 
     def _phish_hints(self, url):
+        """
+        Ищет фишинговые ключевые слова в URL.
+        Проверяет наличие слов: login, verify, account, secure, update
+        """
         hints = ['login', 'verify', 'account', 'secure', 'update']
         return 1.0 if any(hint in url.lower() for hint in hints) else 0.0
 
     def _domain_in_brand(self, domain):
+        """
+        Проверяет наличие брендов в доменном имени.
+        Ищет: paypal, ebay, amazon, bank
+        """
         brands = ['paypal', 'ebay', 'amazon', 'bank']
         return 1.0 if any(brand in domain.lower() for brand in brands) else 0.0
 
     def _brand_in_subdomain(self, subdomain):
+        """
+        Проверяет наличие брендов в поддомене.
+        Ищет те же бренды, что и в _domain_in_brand
+        """
         brands = ['paypal', 'ebay', 'amazon', 'bank']
         return 1.0 if any(brand in subdomain.lower() for brand in brands) else 0.0
 
     def _brand_in_path(self, path):
+        """
+        Проверяет наличие брендов в пути URL.
+        Ищет те же бренды, что и в _domain_in_brand.
+        """
         brands = ['paypal', 'ebay', 'amazon', 'bank']
         return 1.0 if any(brand in path.lower() for brand in brands) else 0.0
 
     def _is_suspicious_tld(self, tld):
+        """
+        Проверяет TLD (домен верхнего уровня) на подозрительность.
+        Сравнивает с списком: .xyz, .top, .gq, .tk.
+        """
         suspicious = ['.xyz', '.top', '.gq', '.tk']
         return 1.0 if tld in suspicious else 0.0
 
     def _ratio_int_hyperlinks(self, soup, domain):
+        """
+        Вычисляет отношение внутренних гиперссылок к общему количеству.
+        Внутренние ссылки содержат указанный домен.
+        """
         if not soup:
             return 0.0
         links = soup.find_all('a', href=True)
@@ -420,6 +486,10 @@ class PhishingDetector:
         return internal / len(links)
 
     def _ratio_ext_hyperlinks(self, soup, domain):
+        """
+        Вычисляет отношение внешних гиперссылок к общему количеству.
+        Внешние ссылки не содержат указанный домен и начинаются с http
+        """
         if not soup:
             return 0.0
         links = soup.find_all('a', href=True)
@@ -429,6 +499,9 @@ class PhishingDetector:
         return external / len(links)
 
     def _ratio_null_hyperlinks(self, soup):
+        """
+        Вычисляет отношение "нулевых" гиперссылок (не начинающихся с http).
+        """
         if not soup:
             return 0.0
         links = soup.find_all('a', href=True)
@@ -438,12 +511,21 @@ class PhishingDetector:
         return null / len(links)
 
     def _links_in_tags(self, soup):
+        """
+        Подсчитывает количество ссылок в определенных HTML-тегах
+        Анализирует теги: img, script, iframe, form
+        Возвращает среднее количество на тег
+        """
         if not soup:
             return 0.0
         tags = ['img', 'script', 'iframe', 'form']
         return sum(len(soup.find_all(tag)) for tag in tags) / 4.0
 
     def _ratio_int_redirections(self, url):
+        """
+        Вычисляет отношение внутренних редиректов к общему количеству.
+        Внутренние редиректы содержат исходный домен.
+        """
         try:
             response = requests.get(url, allow_redirects=True, timeout=5, verify=False)
             domain = urllib.parse.urlparse(url).netloc
@@ -453,6 +535,10 @@ class PhishingDetector:
             return 0.0
 
     def _ratio_ext_redirections(self, url):
+        """
+        Вычисляет отношение внешних редиректов к общему количеству.
+        Внешние редиректы не содержат исходный домен.
+        """
         try:
             response = requests.get(url, allow_redirects=True, timeout=5, verify=False)
             domain = urllib.parse.urlparse(url).netloc
@@ -462,14 +548,22 @@ class PhishingDetector:
             return 0.0
 
     def _ratio_int_errors(self, soup):
-        # Заглушка - нужна реальная реализация
+        """
+        Заглушка для анализа отношения внутренних ошибок.
+        """
         return 0.0
 
     def _ratio_ext_errors(self, soup):
-        # Заглушка - нужна реальная реализация
+        """
+        Заглушка для анализа отношения внешних ошибок.
+        """
         return 0.0
 
     def _ratio_int_media(self, soup, domain):
+        """
+        Вычисляет отношение внутренних медиа-ресурсов к общему количеству.
+        Анализирует теги img, video, audio с src, содержащим домен.
+        """
         if not soup:
             return 0.0
         media = soup.find_all(['img', 'video', 'audio'])
@@ -479,6 +573,10 @@ class PhishingDetector:
         return internal / len(media)
 
     def _ratio_ext_media(self, soup, domain):
+        """
+        Вычисляет отношение внешних медиа-ресурсов к общему количеству.
+        Анализирует теги img, video, audio с внешними src.
+        """
         if not soup:
             return 0.0
         media = soup.find_all(['img', 'video', 'audio'])
@@ -488,6 +586,10 @@ class PhishingDetector:
         return external / len(media)
 
     def _check_sfh(self, soup):
+        """
+        Проверяет формы на наличие пустого action (Server Form Handler).
+        Возвращает отношение форм без action к общему количеству форм.
+        """
         if not soup:
             return 0.0
         forms = soup.find_all('form')
@@ -497,6 +599,10 @@ class PhishingDetector:
         return empty / len(forms)
 
     def _safe_anchor(self, soup):
+        """
+        Проверяет ссылки на безопасность
+        Возвращает отношение безопасных ссылок к общему количеству.
+        """
         if not soup:
             return 0.0
         links = soup.find_all('a', href=True)
@@ -506,6 +612,9 @@ class PhishingDetector:
         return safe / len(links)
 
     def _has_right_click(self, soup):
+        """
+        Проверяет наличие скриптов, блокирующих правую кнопку мыши.
+        """
         if not soup:
             return 1.0
         scripts = soup.find_all('script')
@@ -515,6 +624,9 @@ class PhishingDetector:
         return 0.0
 
     def _domain_with_copyright(self, soup, domain):
+        """
+        Проверяет наличие упоминания домена в текстах copyright.
+        """
         if not soup:
             return 0.0
         copyrights = soup.find_all(string=lambda text: 'copyright' in text.lower())
@@ -523,7 +635,9 @@ class PhishingDetector:
         return 1.0 if any(domain.lower() in c.lower() for c in copyrights) else 0.0
 
     def _count_hyperlinks(self, soup):
-        """Подсчитывает количество гиперссылок на странице"""
+        """
+        Подсчитывает общее количество гиперссылок на странице.
+        """
         if not soup:
             return 0.0
         return float(len(soup.find_all('a', href=True)))
@@ -692,13 +806,13 @@ class PhishingDetector:
 if __name__ == "__main__":
     detector = PhishingDetector()
 
-    # 1. Обучение модели
+    # Обучение модели
     print("Обучение модели...")
     detector.train_model("urls.csv")
     detector.save_scaler()
 
     # detector.load_scaler()
-    # 2. Проверка URL
+    # Проверка URL
     while True:
         print("\n" + "=" * 50)
         url = input("Введите URL для проверки (или 'exit'): ").strip()
